@@ -53,3 +53,72 @@ It helps you:
 ```bash
 git clone https://github.com/Sumeet-R/AWSDataJack.git
 cd AWSDataJack
+```
+
+### 2. Configure Dropbox Access and AWS Region
+Edit `config.ini` to include your AWS region and Dropbox access token:
+
+```ini
+[aws]
+region = us-east-1
+
+[dropbox]
+access_token = YOUR_DROPBOX_ACCESS_TOKEN
+```
+
+- Create a Dropbox App [here](https://www.dropbox.com/developers/apps)  
+- Set scope to: **App Folder**  
+- Generate and copy the access token  
+
+```bash
+nano config.ini
+```
+
+### 3. Run the Installer
+```bash
+sudo bash installer.sh
+```
+
+This will:
+- Install Python 3 and pip  
+- Install required Python packages (`dropbox`, `boto3`, `configparser`)  
+- Create the `upload/` directory  
+- Run the script once  
+- Schedule it via `cron` to run daily at **23:30**  
+
+---
+
+## 📄 Output
+
+- All retrieved files and dumps are saved in the `upload/` directory.  
+- The directory is uploaded to Dropbox after each run.  
+- `awsdatajack.log` stores run logs for review.
+
+---
+
+## 🔍 Detection Expectations
+
+When AWSDataJack runs, it will generate AWS CloudTrail events that SOC teams and CNAPPs can detect. Examples:
+
+| Module                | Example API Calls (CloudTrail)                         |
+|-----------------------|--------------------------------------------------------|
+| S3                    | `ListBuckets`, `ListObjectsV2`, `GetObject`            |
+| Secrets Manager       | `ListSecrets`, `GetSecretValue`                         |
+| DynamoDB              | `ListTables`, `Scan`                                   |
+| Dropbox Exfiltration  | *No CloudTrail events – external network activity only* |
+
+Security teams should look for:
+- Unexpected data access patterns
+- Access from unusual IPs or instance profiles
+- Large-volume `GetObject` or `Scan` operations
+- `GetSecretValue` calls from unexpected principals
+
+---
+
+## ⚠️ Legal Disclaimer
+
+This tool is intended **only** for authorized environments such as lab setups or sanctioned red team assessments.  
+You are responsible for complying with all applicable laws and regulations.  
+Unauthorized use is strictly prohibited.
+
+---
