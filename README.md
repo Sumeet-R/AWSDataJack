@@ -66,7 +66,7 @@ Edit `config.ini` to include your AWS region and Dropbox access token:
 
 ```ini
 [aws]
-region = us-east-1
+region = YOUR_AWS_REGION
 
 [dropbox]
 access_token = YOUR_DROPBOX_ACCESS_TOKEN
