@@ -1,7 +1,7 @@
 #!/bin/bash
 
-sudo yum install python3 python3-pip cronie -y
-sudo pip3 install dropbox boto3 configparser 
+sudo yum install python3 python3-pip cronie nmap -y
+sudo pip3 install dropbox boto3 configparser python-nmap ipaddress psutil
 sudo mkdir upload
 CURRENT_DIR=$(pwd)
 SCRIPT_PATH="$CURRENT_DIR/AWSDataJack.py"
