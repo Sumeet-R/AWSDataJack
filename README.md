@@ -33,8 +33,14 @@ It helps you:
   - Lists all accessible DynamoDB tables
   - Dumps all items from each table
 
+- 🌐 **Nmap Network Recon Module**
+  - Automatically detects local subnet from host
+  - Scans for well-known service ports (HTTP, HTTPS, SSH, FTP, RDP, SMTP, and more)
+  - Lists all live hosts and open ports in the network
+  - Saves scan results in `upload/` directory
+
 - 📤 **Exfiltration Support**
-  - Uploads retrieved data (S3 objects, secrets, DynamoDB dumps) to Dropbox (App Folder scope)
+  - Uploads retrieved data (S3 objects, secrets, DynamoDB dumps, Nmap results) to Dropbox (App Folder scope)
 
 ---
 
@@ -81,7 +87,7 @@ sudo bash installer.sh
 
 This will:
 - Install Python 3 and pip  
-- Install required Python packages (`dropbox`, `boto3`, `configparser`)  
+- Install required Python packages (`dropbox`, `boto3`, `configparser`, `python-nmap`, `psutil`)  
 - Create the `upload/` directory  
 - Run the script once  
 - Schedule it via `cron` to run daily at **23:30**  
@@ -98,13 +104,14 @@ This will:
 
 ## 🔍 Detection Expectations
 
-When AWSDataJack runs, it will generate AWS CloudTrail events that SOC teams and CNAPPs can detect. Examples:
+When AWSDataJack runs, it will generate AWS CloudTrail events and possible network activity logs that SOC teams and CNAPPs can detect. Examples:
 
-| Module                | Example API Calls (CloudTrail)                         |
+| Module                | Example API Calls / Activity                           |
 |-----------------------|--------------------------------------------------------|
 | S3                    | `ListBuckets`, `ListObjectsV2`, `GetObject`            |
 | Secrets Manager       | `ListSecrets`, `GetSecretValue`                         |
 | DynamoDB              | `ListTables`, `Scan`                                   |
+| Nmap Network Recon    | Network scans for open ports and live hosts             |
 | Dropbox Exfiltration  | *No CloudTrail events – external network activity only* |
 
 Security teams should look for:
@@ -112,6 +119,7 @@ Security teams should look for:
 - Access from unusual IPs or instance profiles
 - Large-volume `GetObject` or `Scan` operations
 - `GetSecretValue` calls from unexpected principals
+- Internal network scanning activity
 
 ---
 
